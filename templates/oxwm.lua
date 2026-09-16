@@ -16,8 +16,8 @@
 ---@class oxwm
 oxwm = {}
 
----Spawn a command
----@param cmd string|string[] Command to spawn (string or array of strings)
+---Spawn a command when the keybind fires.
+---@param cmd string|string[] A shell line, or a program plus its arguments. Every table element reaches the command.
 ---@return table Action table for keybinding
 function oxwm.spawn(cmd) end
 

@@ -1261,7 +1261,74 @@ fn getStringArg(state: *c.lua_State, idx: c_int) ?[]const u8 {
     return getLuaString(state, idx);
 }
 
+fn isShellSafeByte(b: u8) bool {
+    if (std.ascii.isAlphanumeric(b)) return true;
+    return switch (b) {
+        '_', '@', '%', '+', '=', ':', ',', '.', '/', '-' => true,
+        else => false,
+    };
+}
+
+fn shellQuotedLen(s: []const u8) usize {
+    if (s.len == 0) return 2;
+    var extra: usize = 0;
+    var need_quote = false;
+    for (s) |b| {
+        if (b == '\'') {
+            need_quote = true;
+            extra += 3;
+        } else if (!isShellSafeByte(b)) {
+            need_quote = true;
+        }
+    }
+    if (!need_quote) return s.len;
+    return s.len + extra + 2;
+}
+
+/// Joins argv elements into one shell command line. Elements without
+/// shell-special bytes stay verbatim, the rest get single-quoted, so the
+/// result survives `sh -c` with arguments intact.
+pub fn shellQuoteJoin(allocator: std.mem.Allocator, elems: []const []const u8) ![]u8 {
+    var total: usize = 0;
+    for (elems, 0..) |elem, i| {
+        if (i > 0) total += 1;
+        total += shellQuotedLen(elem);
+    }
+    const out = try allocator.alloc(u8, total);
+    var pos: usize = 0;
+    for (elems, 0..) |elem, i| {
+        if (i > 0) {
+            out[pos] = ' ';
+            pos += 1;
+        }
+        if (elem.len == 0) {
+            out[pos] = '\'';
+            out[pos + 1] = '\'';
+            pos += 2;
+        } else if (shellQuotedLen(elem) == elem.len) {
+            @memcpy(out[pos..][0..elem.len], elem);
+            pos += elem.len;
+        } else {
+            out[pos] = '\'';
+            pos += 1;
+            for (elem) |b| {
+                if (b == '\'') {
+                    @memcpy(out[pos..][0..4], "'\\''");
+                    pos += 4;
+                } else {
+                    out[pos] = b;
+                    pos += 1;
+                }
+            }
+            out[pos] = '\'';
+            pos += 1;
+        }
+    }
+    return out;
+}
+
 fn extractSpawnCommand(state: *c.lua_State, idx: c_int) ?[]const u8 {
+    const cfg = config orelse return null;
     const len = c.lua_rawlen(state, idx);
     if (len == 0) return null;
 
@@ -1278,16 +1345,23 @@ fn extractSpawnCommand(state: *c.lua_State, idx: c_int) ?[]const u8 {
             std.mem.eql(u8, first.?, "sh") and std.mem.eql(u8, second.?, "-c"))
         {
             _ = c.lua_rawgeti(state, idx, 3);
-            const cmd = getLuaString(state, -1);
+            const cmd = dupeLuaString(state, -1);
             c.lua_settop(state, -2);
             return cmd;
         }
     }
 
-    _ = c.lua_rawgeti(state, idx, 1);
-    const first_elem = getLuaString(state, -1);
-    c.lua_settop(state, -2);
-    return first_elem;
+    var elems: std.ArrayList([]const u8) = .empty;
+    const arena = cfg.string_arena.allocator();
+    var i: usize = 1;
+    while (i <= len) : (i += 1) {
+        _ = c.lua_rawgeti(state, idx, @intCast(i));
+        const elem = getLuaString(state, -1);
+        c.lua_settop(state, -2);
+        if (elem == null) return null;
+        elems.append(arena, elem.?) catch return null;
+    }
+    return shellQuoteJoin(arena, elems.items) catch return null;
 }
 
 fn getLuaString(state: *c.lua_State, idx: c_int) ?[]const u8 {
@@ -1515,4 +1589,36 @@ fn keynameToKeysym(name: []const u8) ?u64 {
     }
 
     return null;
+}
+
+test "shellQuoteJoin leaves plain argv verbatim" {
+    const testing = std.testing;
+    const got = try shellQuoteJoin(testing.allocator, &.{ "screenshot.sh", "area" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("screenshot.sh area", got);
+}
+
+test "shellQuoteJoin quotes args with spaces" {
+    const testing = std.testing;
+    const got = try shellQuoteJoin(testing.allocator, &.{ "notify-send", "hello world" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("notify-send 'hello world'", got);
+}
+
+test "shellQuoteJoin escapes single quotes" {
+    const testing = std.testing;
+    const got = try shellQuoteJoin(testing.allocator, &.{"prog"});
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("prog", got);
+
+    const quoted = try shellQuoteJoin(testing.allocator, &.{ "prog", "it's" });
+    defer testing.allocator.free(quoted);
+    try testing.expectEqualStrings("prog 'it'\\''s'", quoted);
+}
+
+test "shellQuoteJoin quotes empty and glob args" {
+    const testing = std.testing;
+    const got = try shellQuoteJoin(testing.allocator, &.{ "prog", "", "*.png" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("prog '' '*.png'", got);
 }
