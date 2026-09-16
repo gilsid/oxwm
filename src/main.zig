@@ -190,4 +190,5 @@ fn runAutostartCommands(wm: *WindowManager) !void {
 test {
     _ = @import("x11/events.zig");
     _ = @import("config/lua.zig");
+    _ = @import("wm/core.zig");
 }
