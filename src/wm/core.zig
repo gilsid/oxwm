@@ -731,31 +731,43 @@ pub fn hasClientsOnTag(monitor: *monitor_mod.Monitor, tag_mask: u32) bool {
     return false;
 }
 
-pub fn view(tag_mask: u32, wm: *WindowManager) void {
-    const monitor = wm.selected_monitor orelse return;
-    if (tag_mask == monitor.tagset[monitor.sel_tags]) {
-        return;
-    }
-    monitor.sel_tags ^= 1;
-    if (tag_mask != 0) {
-        monitor.tagset[monitor.sel_tags] = tag_mask;
-        monitor.pertag.prevtag = monitor.pertag.curtag;
+pub const ViewDecision = enum { ignore, switch_new, toggle_back };
 
-        if (tag_mask == ~@as(u32, 0)) {
-            monitor.pertag.curtag = 0;
-        } else {
-            var i: u32 = 0;
-            while (i < wm.config.tag_count) : (i += 1) {
-                if ((tag_mask & (@as(u32, 1) << @intCast(i))) != 0) break;
-            }
-            monitor.pertag.curtag = i + 1;
-        }
-    } else {
-        const tmp = monitor.pertag.prevtag;
-        monitor.pertag.prevtag = monitor.pertag.curtag;
-        monitor.pertag.curtag = tmp;
-    }
+/// Pure decision helper for `view`, kept side-effect free so it can be
+/// unit-tested without an X server.
+pub fn resolveView(current: u32, req: u32, back_and_forth: bool) ViewDecision {
+    if (req == 0) return .ignore;
+    if (req != current) return .switch_new;
+    return if (back_and_forth) .toggle_back else .ignore;
+}
 
+/// Returns false for masks that can never describe a real view. That is
+/// zero, or any mask with bits past tag_count. The all-tags sentinel ~0U
+/// stays accepted because view still handles it below.
+pub fn isValidViewMask(tag_mask: u32, tag_count: u32) bool {
+    if (tag_mask == 0) return false;
+    if (tag_mask == ~@as(u32, 0)) return true;
+    if (tag_count == 0 or tag_count >= 32) return tag_count != 0;
+    const allowed: u32 = (@as(u32, 1) << @intCast(tag_count)) - 1;
+    return (tag_mask & ~allowed) == 0;
+}
+
+fn clampTagIndex(value: u32, tag_count: u32) u32 {
+    if (value == 0) return 0;
+    if (value > 12) return 1;
+    if (tag_count >= 1 and tag_count <= 12 and value > tag_count) return tag_count;
+    return value;
+}
+
+/// Clamps `pertag.curtag/prevtag` into the valid range after `tag_count`
+/// shrinks across a config reload. Index 0 (all-tags view) is preserved.
+pub fn sanitizePertag(monitor: *Monitor, tag_count: u32) void {
+    monitor.pertag.curtag = clampTagIndex(monitor.pertag.curtag, tag_count);
+    monitor.pertag.prevtag = clampTagIndex(monitor.pertag.prevtag, tag_count);
+}
+
+/// Applies the per-tag settings for `monitor.pertag.curtag`.
+fn applyPertag(monitor: *Monitor, wm: *WindowManager) void {
     monitor.nmaster = monitor.pertag.nmasters[monitor.pertag.curtag];
     monitor.mfact = monitor.pertag.mfacts[monitor.pertag.curtag];
     monitor.sel_lt = monitor.pertag.sellts[monitor.pertag.curtag];
@@ -765,9 +777,126 @@ pub fn view(tag_mask: u32, wm: *WindowManager) void {
         monitor.show_bar = new_show_bar;
         window_manager.actions.updateBarVisibility(monitor, wm);
     }
+}
+
+pub fn view(tag_mask: u32, wm: *WindowManager) void {
+    const monitor = wm.selected_monitor orelse return;
+    if (!isValidViewMask(tag_mask, wm.config.tag_count)) return;
+
+    switch (resolveView(monitor.tagset[monitor.sel_tags], tag_mask, wm.config.tag_back_and_forth)) {
+        .ignore => return,
+        .toggle_back => {
+            // Same tag requested with back-and-forth enabled: flip to the
+            // previously viewed tagset. The other slot already holds it, so
+            // tagset must NOT be overwritten here.
+            monitor.sel_tags ^= 1;
+            if (!isValidViewMask(monitor.tagset[monitor.sel_tags], wm.config.tag_count)) {
+                // The other slot points at tags that no longer exist after a
+                // reload shrank tag_count. Flip back and stay put.
+                monitor.sel_tags ^= 1;
+                return;
+            }
+            sanitizePertag(monitor, wm.config.tag_count);
+            const tmp = monitor.pertag.prevtag;
+            monitor.pertag.prevtag = monitor.pertag.curtag;
+            monitor.pertag.curtag = tmp;
+            sanitizePertag(monitor, wm.config.tag_count);
+            applyPertag(monitor, wm);
+            focusTopClient(monitor, wm);
+            arrange(monitor, wm);
+            wm.invalidateBars();
+            std.debug.print("view: toggle-back tag_mask={d}\n", .{monitor.tagset[monitor.sel_tags]});
+            return;
+        },
+        .switch_new => {},
+    }
+
+    monitor.sel_tags ^= 1;
+    monitor.tagset[monitor.sel_tags] = tag_mask;
+    monitor.pertag.prevtag = monitor.pertag.curtag;
+
+    if (tag_mask == ~@as(u32, 0)) {
+        monitor.pertag.curtag = 0;
+    } else {
+        var i: u32 = 0;
+        while (i < wm.config.tag_count) : (i += 1) {
+            if ((tag_mask & (@as(u32, 1) << @intCast(i))) != 0) break;
+        }
+        monitor.pertag.curtag = i + 1;
+    }
+    sanitizePertag(monitor, wm.config.tag_count);
+
+    applyPertag(monitor, wm);
 
     focusTopClient(monitor, wm);
     arrange(monitor, wm);
     wm.invalidateBars();
     std.debug.print("view: tag_mask={d}\n", .{monitor.tagset[monitor.sel_tags]});
+}
+
+test "resolveView ignores zero mask" {
+    const testing = std.testing;
+    try testing.expectEqual(ViewDecision.ignore, resolveView(1, 0, false));
+    try testing.expectEqual(ViewDecision.ignore, resolveView(1, 0, true));
+}
+
+test "resolveView switches on different mask" {
+    const testing = std.testing;
+    try testing.expectEqual(ViewDecision.switch_new, resolveView(1, 8, false));
+    try testing.expectEqual(ViewDecision.switch_new, resolveView(1, 8, true));
+    try testing.expectEqual(ViewDecision.switch_new, resolveView(3, 1, true));
+}
+
+test "resolveView same mask depends on back-and-forth flag" {
+    const testing = std.testing;
+    try testing.expectEqual(ViewDecision.ignore, resolveView(8, 8, false));
+    try testing.expectEqual(ViewDecision.toggle_back, resolveView(8, 8, true));
+}
+
+test "isValidViewMask rejects zero and out-of-range bits" {
+    const testing = std.testing;
+    try testing.expect(!isValidViewMask(0, 9));
+    try testing.expect(isValidViewMask(1, 9));
+    try testing.expect(isValidViewMask(@as(u32, 1) << 8, 9));
+    try testing.expect(!isValidViewMask(@as(u32, 1) << 9, 9));
+    try testing.expect(isValidViewMask(0b11, 9));
+    try testing.expect(!isValidViewMask(0b11 << 8, 9));
+    try testing.expect(isValidViewMask(~@as(u32, 0), 9));
+    try testing.expect(!isValidViewMask(1, 0));
+}
+
+test "sanitizePertag keeps valid and all-view indices" {
+    const testing = std.testing;
+    var m: Monitor = .{};
+    m.pertag.curtag = 3;
+    m.pertag.prevtag = 1;
+    sanitizePertag(&m, 9);
+    try testing.expectEqual(@as(u32, 3), m.pertag.curtag);
+    try testing.expectEqual(@as(u32, 1), m.pertag.prevtag);
+
+    m.pertag.curtag = 0;
+    m.pertag.prevtag = 0;
+    sanitizePertag(&m, 9);
+    try testing.expectEqual(@as(u32, 0), m.pertag.curtag);
+    try testing.expectEqual(@as(u32, 0), m.pertag.prevtag);
+}
+
+test "sanitizePertag clamps after tag_count shrinks" {
+    const testing = std.testing;
+    var m: Monitor = .{};
+    m.pertag.curtag = 9;
+    m.pertag.prevtag = 8;
+    sanitizePertag(&m, 5);
+    try testing.expectEqual(@as(u32, 5), m.pertag.curtag);
+    try testing.expectEqual(@as(u32, 5), m.pertag.prevtag);
+}
+
+test "sanitizePertag recovers corrupt indices" {
+    const testing = std.testing;
+    var m: Monitor = .{};
+    m.pertag.curtag = 99;
+    m.pertag.prevtag = 100;
+    sanitizePertag(&m, 9);
+    try testing.expectEqual(@as(u32, 1), m.pertag.curtag);
+    try testing.expectEqual(@as(u32, 1), m.pertag.prevtag);
 }

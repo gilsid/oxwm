@@ -297,6 +297,11 @@ oxwm.key.bind({ modkey }, "9", oxwm.tag.view(8))
 -- oxwm.key.bind({ modkey }, "minus", oxwm.tag.view(10))
 -- oxwm.key.bind({ modkey }, "equal", oxwm.tag.view(11))
 
+-- Back-and-forth is opt-in and off by default. Turn it on and pressing the
+-- current workspace key, or clicking the active tag in the bar, jumps back
+-- to the workspace you came from.
+-- oxwm.tag.set_back_and_forth(true)
+
 -- Move focused window to workspace N
 oxwm.key.bind({ modkey, "Shift" }, "1", oxwm.tag.move_to(0))
 oxwm.key.bind({ modkey, "Shift" }, "2", oxwm.tag.move_to(1))
