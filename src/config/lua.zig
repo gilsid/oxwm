@@ -424,7 +424,7 @@ fn luaKeyBind(state: ?*c.lua_State) callconv(.c) c_int {
     if (c.lua_type(s, -1) == c.LUA_TNUMBER) {
         int_arg = @intCast(c.lua_tointegerx(s, -1, null));
     } else if (c.lua_type(s, -1) == c.LUA_TSTRING) {
-        str_arg = getLuaString(s, -1);
+        str_arg = dupeLuaString(s, -1);
     } else if (c.lua_type(s, -1) == c.LUA_TTABLE) {
         str_arg = extractSpawnCommand(s, -1);
     }
@@ -503,7 +503,7 @@ fn luaKeyChord(state: ?*c.lua_State) callconv(.c) c_int {
     if (c.lua_type(s, -1) == c.LUA_TNUMBER) {
         keybind.int_arg = @intCast(c.lua_tointegerx(s, -1, null));
     } else if (c.lua_type(s, -1) == c.LUA_TSTRING) {
-        keybind.str_arg = getLuaString(s, -1);
+        keybind.str_arg = dupeLuaString(s, -1);
     } else if (c.lua_type(s, -1) == c.LUA_TTABLE) {
         keybind.str_arg = extractSpawnCommand(s, -1);
     }
@@ -744,19 +744,19 @@ fn luaRuleAdd(state: ?*c.lua_State) callconv(.c) c_int {
 
     _ = c.lua_getfield(s, 1, "class");
     if (c.lua_type(s, -1) == c.LUA_TSTRING) {
-        rule.class = getLuaString(s, -1);
+        rule.class = dupeLuaString(s, -1);
     }
     c.lua_settop(s, -2);
 
     _ = c.lua_getfield(s, 1, "instance");
     if (c.lua_type(s, -1) == c.LUA_TSTRING) {
-        rule.instance = getLuaString(s, -1);
+        rule.instance = dupeLuaString(s, -1);
     }
     c.lua_settop(s, -2);
 
     _ = c.lua_getfield(s, 1, "title");
     if (c.lua_type(s, -1) == c.LUA_TSTRING) {
-        rule.title = getLuaString(s, -1);
+        rule.title = dupeLuaString(s, -1);
     }
     c.lua_settop(s, -2);
 
