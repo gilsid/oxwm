@@ -516,7 +516,7 @@ pub fn applyRules(client: *Client, wm: *WindowManager) void {
         const monitor_tagset = monitor.tagset[monitor.sel_tags];
         const is_tag_focused = (monitor_tagset & client.tags) == client.tags;
         if (!is_tag_focused) {
-            view(client.tags, wm);
+            viewSwitch(client.tags, wm);
         }
     }
 }
@@ -808,8 +808,18 @@ pub fn view(tag_mask: u32, wm: *WindowManager) void {
             std.debug.print("view: toggle-back tag_mask={d}\n", .{monitor.tagset[monitor.sel_tags]});
             return;
         },
-        .switch_new => {},
+        .switch_new => viewSwitch(tag_mask, wm),
     }
+}
+
+/// Programmatic view switch, used for window rules. Unlike `view` this
+/// never toggles back: when the requested tagset is already visible
+/// there is nothing to do, so a rule can not yank the user away from
+/// the tag they are looking at.
+pub fn viewSwitch(tag_mask: u32, wm: *WindowManager) void {
+    const monitor = wm.selected_monitor orelse return;
+    if (!isValidViewMask(tag_mask, wm.config.tag_count)) return;
+    if (tag_mask == monitor.tagset[monitor.sel_tags]) return;
 
     monitor.sel_tags ^= 1;
     monitor.tagset[monitor.sel_tags] = tag_mask;
